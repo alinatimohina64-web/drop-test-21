@@ -17,7 +17,13 @@
 
 Фильтр BTC (как в индикаторе v4.2): тренд BTC — цена выше EMA50 и EMA21 выше EMA50
 (шорт зеркально) на последней закрытой свече BTC прошлого периода ТФ BTC.
-Связки: 5m → BTC 1ч, 15m → BTC 4ч.
+Связки: 5m → BTC 1ч, 15m → BTC 4ч, 30m → BTC 4ч. Связку 30m нашли глазами на SUI,
+поэтому для неё SUI в критерий не входит.
+
+СВЕРКА С TradingView: для SUI 30m, XRP 5m и XRP 15m отдельно считаются сделки после
+01.08.2026 (как строка «после даты» в индикаторе) — чтобы сравнить с таблицей индикатора.
+Точного совпадения не будет (TradingView — свечи Bybit, тест — OKX), но порядок цифр
+должен быть тот же.
 
 КРИТЕРИЙ (объявлен ДО прогона), отдельно для каждой связки. Фильтр принимаем, если:
   1) мат. «BTC за» лучше «BTC против» на >= 70% монет (монеты, где в обеих группах
@@ -46,7 +52,10 @@ REPORT = "ind_btc_report.txt"
 FEE = 0.11                            # % за круг
 MIN_N = 20
 M5, M15, H1, H4 = 300000, 900000, 3600000, 14400000
-LINKS = [("5m", M5, "1ч", H1), ("15m", M15, "4ч", H4)]
+M30 = 1800000
+LINKS = [("5m", M5, "1ч", H1, set()), ("15m", M15, "4ч", H4, set()), ("30m", M30, "4ч", H4, {"SUI"})]
+OOS_START = 1785542400000             # 01.08.2026 00:00 UTC — как «после даты» в индикаторе
+RECON = [("SUI", "30m"), ("XRP", "5m"), ("XRP", "15m")]
 
 # ---------------------------------------------------------------- общие функции
 # (те же, что в trend_grid_test.py)
@@ -344,11 +353,12 @@ def main():
         say("Нет данных BTC.")
         return
     btc = {}
-    for _, _, bname, bms in LINKS:
+    for _, _, bname, bms, _ in LINKS:
         bb = agg(btc5, bms)
         btc[bms] = ([x[0] for x in bb], btc_trend(bb))
 
-    for tfname, tfms, bname, bms in LINKS:
+    recon = {}
+    for tfname, tfms, bname, bms, skip in LINKS:
         bt_t, bt_tr = btc[bms]
         pooled = {"all": [], "for": [], "ag": []}
         halves = {1: {"for": [], "ag": []}, 2: {"for": [], "ag": []}}
@@ -363,6 +373,7 @@ def main():
             atrp = atr_pct([x[:5] for x in b])
             mid = (b[0][0] + b[-1][0]) / 2
             res = {"all": [], "for": [], "ag": []}
+            oos = {"all": [], "for": [], "ag": []}
             for i, d in sig:
                 res_pct = outcome(b, i, d, 2.5 * atrp[i], 5.2 * atrp[i])
                 if res_pct is None:
@@ -375,7 +386,16 @@ def main():
                 grp = "for" if bt_tr[j] == d else "ag"
                 res["all"].append(res_pct)
                 res[grp].append(res_pct)
+                if b[i][0] >= OOS_START:            # как isOOSBar: время открытия свечи
+                    oos["all"].append(res_pct)
+                    oos[grp].append(res_pct)
                 halves[1 if b[i][0] < mid else 2][grp].append(res_pct)
+            if (sym, tfname) in RECON:
+                recon[(sym, tfname)] = oos
+            if sym in skip:
+                rows.append("  %-8s (в критерий не входит) все: %s | за: %s | против: %s"
+                            % (sym, fmt(st(res["all"])), fmt(st(res["for"])), fmt(st(res["ag"]))))
+                continue
             for k in pooled:
                 pooled[k] += res[k]
             sf, sa = st(res["for"]), st(res["ag"])
@@ -410,6 +430,19 @@ def main():
         say("  ВЕРДИКТ: за лучше на %d из %d монет [%s] · мат. за > 0 [%s] · обе половины [%s] → %s"
             % (better, counted, "да" if c1 else "нет", "да" if c2 else "нет", "да" if c3 else "нет",
                "ПРИНЯТЬ" if (c1 and c2 and c3) else "не принимать"))
+    say("")
+    say("=" * 110)
+    say("СВЕРКА С ТАБЛИЦЕЙ ИНДИКАТОРА (сделки после 01.08.2026)")
+    for sym, tfname in RECON:
+        o = recon.get((sym, tfname))
+        if not o:
+            say("  %s %s: нет данных" % (sym, tfname))
+            continue
+        say("  %s %-4s все: %s | за: %s | против: %s"
+            % (sym, tfname, fmt(st(o["all"])), fmt(st(o["for"])), fmt(st(o["ag"]))))
+    say("  Цифры TradingView для сравнения: SUI 30m после даты — все 70W/27L (мат. +0.446%), "
+        "за 57W/17L (+0.75%), против 13W/10L (−0.54%); XRP 15m — все 122W/36L (+0.142%), за 75W/19L (+0.29%), "
+        "против 47W/17L (−0.08%); XRP 5m — все 99W/52L (−0.062%).")
     say("")
     say("* XRP уже смотрели вручную. Время %.0f мин" % ((time.time() - t0) / 60))
     with open(REPORT, "w", encoding="utf-8") as f:
