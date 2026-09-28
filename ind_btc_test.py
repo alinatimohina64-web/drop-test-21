@@ -26,6 +26,7 @@
   3) суммарный мат. «за» лучше «против» в обеих половинах периода.
 
 Монеты: 10 монет первого прогона + топ-50 OKX, кроме BTC. XRP уже смотрели вручную.
+Файл самостоятельный: ничего, кроме него и workflow, в репозитории не нужно.
 Переменные: DAYS (по умолчанию 365). Отчёт: ind_btc_report.txt
 """
 import bisect
@@ -36,7 +37,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
-import trend_grid_test as g
+import math
+import urllib.request
 
 DAYS = int(os.environ.get("DAYS") or 365)
 DATA_DIR = "data_ind"                 # отдельный кэш: здесь свечи с объёмом
@@ -45,6 +47,90 @@ FEE = 0.11                            # % за круг
 MIN_N = 20
 M5, M15, H1, H4 = 300000, 900000, 3600000, 14400000
 LINKS = [("5m", M5, "1ч", H1), ("15m", M15, "4ч", H4)]
+
+# ---------------------------------------------------------------- общие функции
+# (те же, что в trend_grid_test.py)
+
+FIRST_RUN = ["BTC", "ETH", "SOL", "XRP", "DOGE", "LINK", "SUI", "ADA", "AVAX", "BNB"]
+# как в trend_bot.py: стейблы, металлы, токенизированные акции/индексы и TRUMP
+EXCLUDE = {"USDC", "USDE", "DAI", "FDUSD", "TUSD", "PYUSD", "USDT", "USD1", "RLUSD",
+           "XAU", "XAG", "PAXG", "XAUT", "XPT", "XPD", "TRUMP",
+           "SOXL", "SNDK", "TSLA", "NVDA", "AAPL", "MSTR", "INTC", "SPCX", "MU", "AMZN", "GOOGL",
+           "GOOG", "META", "MSFT", "NFLX", "AMD", "PLTR", "COIN", "HOOD", "CRCL", "GME", "AMC",
+           "SPY", "QQQ", "IWM", "TQQQ", "SQQQ", "ORCL", "AVGO", "TSM", "BABA", "SMCI", "ARM",
+           "CRWV", "IBM", "UBER", "DIS", "NKE", "JPM", "V", "MA", "BRKB", "COST", "WMT", "KO",
+           "PEP", "XOM", "CVX", "BA", "GS", "LLY", "UNH", "MRVL", "ASML", "QCOM", "SNOW", "SHOP"}
+
+def http_json(url):
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    for attempt in range(6):
+        try:
+            with urllib.request.urlopen(req, timeout=25) as r:
+                return json.loads(r.read().decode())
+        except Exception:                                       # noqa: BLE001
+            time.sleep(2 * (attempt + 1))
+    raise RuntimeError("OKX не отвечает")
+
+
+def top_new_coins(n=50):
+    """Топ-n бессрочных USDT-контрактов OKX по обороту, без монет первого прогона."""
+    rows = []
+    for r in http_json("https://www.okx.com/api/v5/market/tickers?instType=SWAP").get("data") or []:
+        inst = r.get("instId", "")
+        if not inst.endswith("-USDT-SWAP"):
+            continue
+        base = inst.split("-")[0]
+        if base in EXCLUDE:
+            continue
+        try:
+            rows.append((float(r.get("volCcy24h") or 0) * float(r.get("last") or 0), base))
+        except (TypeError, ValueError):
+            continue
+    rows.sort(reverse=True)
+    return [b for _, b in rows[:n] if b not in FIRST_RUN]
+
+
+def ema(x, n):
+    a, e, out = 2 / (n + 1), None, []
+    for v in x:
+        e = v if e is None else a * v + (1 - a) * e
+        out.append(e)
+    return out
+
+
+def rma(x, n):
+    r, out = None, []
+    for v in x:
+        r = v if r is None else (r * (n - 1) + v) / n
+        out.append(r)
+    return out
+
+
+def trs(b):
+    return [b[0][2] - b[0][3]] + [max(b[i][2] - b[i][3], abs(b[i][2] - b[i - 1][4]),
+                                      abs(b[i][3] - b[i - 1][4])) for i in range(1, len(b))]
+
+
+def adx_arr(b, n=14):
+    tr, pdm, mdm = trs(b), [0.0], [0.0]
+    for i in range(1, len(b)):
+        up, dn = b[i][2] - b[i - 1][2], b[i - 1][3] - b[i][3]
+        pdm.append(up if up > dn and up > 0 else 0.0)
+        mdm.append(dn if dn > up and dn > 0 else 0.0)
+    at, p, m = rma(tr, n), rma(pdm, n), rma(mdm, n)
+    dx = []
+    for i in range(len(b)):
+        pi_ = 100 * p[i] / at[i] if at[i] else 0
+        mi_ = 100 * m[i] / at[i] if at[i] else 0
+        dx.append(100 * abs(pi_ - mi_) / (pi_ + mi_) if pi_ + mi_ else 0)
+    return rma(dx, n)
+
+
+def atr_pct(b, n=14):
+    a = rma(trs(b), n)
+    return [a[i] / b[i][4] * 100 if b[i][4] else 0 for i in range(len(b))]
+
+
 
 _out = []
 
@@ -67,7 +153,7 @@ def fetch(sym, t_from, t_stop=0):
                 url = "%s/api/v5/market/history-candles?instId=%s&bar=5m&limit=100" % (host, inst)
                 if after is not None:
                     url += "&after=%d" % after
-                rows = g.http_json(url).get("data") or []
+                rows = http_json(url).get("data") or []
                 if not rows:
                     break
                 for r in rows:
@@ -142,14 +228,14 @@ def sma(x, n):
 def rsi(c, n=14):
     up = [0.0] + [max(c[i] - c[i - 1], 0.0) for i in range(1, len(c))]
     dn = [0.0] + [max(c[i - 1] - c[i], 0.0) for i in range(1, len(c))]
-    ru, rd = g.rma(up, n), g.rma(dn, n)
+    ru, rd = rma(up, n), rma(dn, n)
     return [100.0 if rd[i] == 0 else 100 - 100 / (1 + ru[i] / rd[i]) for i in range(len(c))]
 
 
 def trend_up_series(b, fast, slow):
     """Для старшего ТФ индикатора: EMA fast > EMA slow."""
     c = [x[4] for x in b]
-    ef, es = g.ema(c, fast), g.ema(c, slow)
+    ef, es = ema(c, fast), ema(c, slow)
     return [ef[i] > es[i] for i in range(len(b))]
 
 
@@ -157,10 +243,10 @@ def signals(b, h4_t, h4_up):
     """Сигналы индикатора: список (индекс бара, сторона)."""
     n = len(b)
     c = [x[4] for x in b]
-    ef, es = g.ema(c, 9), g.ema(c, 21)
+    ef, es = ema(c, 9), ema(c, 21)
     r = rsi(c)
     av = sma([x[5] for x in b], 20)
-    adx = g.adx_arr([x[:5] for x in b])
+    adx = adx_arr([x[:5] for x in b])
     out = []
     last_up = last_dn = None
     last_sig = last_pb = None
@@ -224,7 +310,7 @@ def outcome(b, i, d, tp, sl):
 def btc_trend(b):
     """Тренд BTC как в индикаторе v4.2: +1 / -1 / 0."""
     c = [x[4] for x in b]
-    ef, es = g.ema(c, 21), g.ema(c, 50)
+    ef, es = ema(c, 21), ema(c, 50)
     return [1 if (c[i] > es[i] and ef[i] > es[i]) else -1 if (c[i] < es[i] and ef[i] < es[i]) else 0
             for i in range(len(b))]
 
@@ -244,9 +330,9 @@ def fmt(s):
 
 def main():
     t0 = time.time()
-    coins = [c for c in g.FIRST_RUN if c != "BTC"]
+    coins = [c for c in FIRST_RUN if c != "BTC"]
     try:
-        coins += [c for c in g.top_new_coins(50) if c not in coins and c != "BTC"]
+        coins += [c for c in top_new_coins(50) if c not in coins and c != "BTC"]
     except Exception as e:                                      # noqa: BLE001
         say("! топ-50 не получен (%s)" % e)
     say("ТЕСТ ФИЛЬТРА BTC ДЛЯ СИГНАЛОВ ИНДИКАТОРА · %s · монет %d · %d дней"
@@ -274,7 +360,7 @@ def main():
             b = b5 if tfms == M5 else agg(b5, tfms)
             h4 = agg(b5, H4)
             sig = signals(b, [x[0] for x in h4], trend_up_series(h4, 9, 21))
-            atrp = g.atr_pct([x[:5] for x in b])
+            atrp = atr_pct([x[:5] for x in b])
             mid = (b[0][0] + b[-1][0]) / 2
             res = {"all": [], "for": [], "ag": []}
             for i, d in sig:
