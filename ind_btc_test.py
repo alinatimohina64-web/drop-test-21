@@ -17,7 +17,10 @@
 
 Фильтр BTC (как в индикаторе v4.2): тренд BTC — цена выше EMA50 и EMA21 выше EMA50
 (шорт зеркально) на последней закрытой свече BTC прошлого периода ТФ BTC.
-Связки: 5m → BTC 1ч, 15m → BTC 4ч, 30m → BTC 4ч. Связку 30m нашли глазами на SUI,
+ПРОГОН 3. Связки: график 30m и 1h × BTC 15м / 4ч / 1Д, условие «Тренд BTC».
+Монеты, которые смотрели вручную (XRP, LINK, DOGE, SOL, BNB, AVAX, ADA, ZEC, SUI, ETH),
+в критерий не входят. (Прогон 2: 5m+1ч и 15m+4ч не прошли, 30m+4ч прошёл.)
+Раньше: Связку 30m нашли глазами на SUI,
 поэтому для неё SUI в критерий не входит.
 
 СВЕРКА С TradingView: для SUI 30m, XRP 5m и XRP 15m отдельно считаются сделки после
@@ -53,9 +56,13 @@ FEE = 0.11                            # % за круг
 MIN_N = 20
 M5, M15, H1, H4 = 300000, 900000, 3600000, 14400000
 M30 = 1800000
-LINKS = [("5m", M5, "1ч", H1, set()), ("15m", M15, "4ч", H4, set()), ("30m", M30, "4ч", H4, {"SUI"})]
+D1 = 86400000
+# ПРОГОН 3: монеты, которые смотрели вручную в TradingView, в критерий не входят
+VIEWED = {"XRP", "LINK", "DOGE", "SOL", "BNB", "AVAX", "ADA", "ZEC", "SUI", "ETH"}
+LINKS = [("30m", M30, "15м", M15, VIEWED), ("30m", M30, "4ч", H4, VIEWED), ("30m", M30, "1Д", D1, VIEWED),
+         ("1h", H1, "15м", M15, VIEWED), ("1h", H1, "4ч", H4, VIEWED), ("1h", H1, "1Д", D1, VIEWED)]
 OOS_START = 1785542400000             # 01.08.2026 00:00 UTC — как «после даты» в индикаторе
-RECON = [("SUI", "30m"), ("XRP", "5m"), ("XRP", "15m")]
+RECON = []                            # сверка пройдена в прогоне 2
 
 # ---------------------------------------------------------------- общие функции
 # (те же, что в trend_grid_test.py)
@@ -344,7 +351,7 @@ def main():
         coins += [c for c in top_new_coins(50) if c not in coins and c != "BTC"]
     except Exception as e:                                      # noqa: BLE001
         say("! топ-50 не получен (%s)" % e)
-    say("ТЕСТ ФИЛЬТРА BTC ДЛЯ СИГНАЛОВ ИНДИКАТОРА · %s · монет %d · %d дней"
+    say("ТЕСТ ФИЛЬТРА BTC ДЛЯ СИГНАЛОВ ИНДИКАТОРА (прогон 3) · %s · монет %d · %d дней"
         % (datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"), len(coins), DAYS))
     with ThreadPoolExecutor(max_workers=3) as ex:
         data = dict(ex.map(load, ["BTC"] + coins))
@@ -368,6 +375,8 @@ def main():
             if len(b5) < 20000:
                 continue
             b = b5 if tfms == M5 else agg(b5, tfms)
+            if len(b) < 300:
+                continue
             h4 = agg(b5, H4)
             sig = signals(b, [x[0] for x in h4], trend_up_series(h4, 9, 21))
             atrp = atr_pct([x[:5] for x in b])
@@ -378,8 +387,13 @@ def main():
                 res_pct = outcome(b, i, d, 2.5 * atrp[i], 5.2 * atrp[i])
                 if res_pct is None:
                     continue
-                # последняя закрытая свеча BTC прошлого периода (как request.security [1] + lookahead)
-                p = b[i][0] - b[i][0] % bms - bms
+                # как в индикаторе: ТФ BTC старше графика — прошлая закрытая свеча BTC
+                # (request.security [1] + lookahead); не старше — свеча BTC, закрывшаяся
+                # вместе со свечой графика
+                if bms > tfms:
+                    p = b[i][0] - b[i][0] % bms - bms
+                else:
+                    p = b[i][0] + tfms - bms
                 j = bisect.bisect_left(bt_t, p)
                 if j >= len(bt_t) or bt_t[j] != p:
                     continue
@@ -431,20 +445,10 @@ def main():
             % (better, counted, "да" if c1 else "нет", "да" if c2 else "нет", "да" if c3 else "нет",
                "ПРИНЯТЬ" if (c1 and c2 and c3) else "не принимать"))
     say("")
-    say("=" * 110)
-    say("СВЕРКА С ТАБЛИЦЕЙ ИНДИКАТОРА (сделки после 01.08.2026)")
-    for sym, tfname in RECON:
-        o = recon.get((sym, tfname))
-        if not o:
-            say("  %s %s: нет данных" % (sym, tfname))
-            continue
-        say("  %s %-4s все: %s | за: %s | против: %s"
-            % (sym, tfname, fmt(st(o["all"])), fmt(st(o["for"])), fmt(st(o["ag"]))))
-    say("  Цифры TradingView для сравнения: SUI 30m после даты — все 70W/27L (мат. +0.446%), "
-        "за 57W/17L (+0.75%), против 13W/10L (−0.54%); XRP 15m — все 122W/36L (+0.142%), за 75W/19L (+0.29%), "
-        "против 47W/17L (−0.08%); XRP 5m — все 99W/52L (−0.062%).")
     say("")
-    say("* XRP уже смотрели вручную. Время %.0f мин" % ((time.time() - t0) / 60))
+    say("* монеты, которые смотрели вручную (%s), показаны, но в критерий не входят." % ", ".join(sorted(VIEWED)))
+    say("  Связок 6 — критерий общий для каждой; принимать стоит связку, прошедшую его с запасом.")
+    say(" Время %.0f мин" % ((time.time() - t0) / 60))
     with open(REPORT, "w", encoding="utf-8") as f:
         f.write("\n".join(_out) + "\n")
 
