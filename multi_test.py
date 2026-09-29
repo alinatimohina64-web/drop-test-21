@@ -12,12 +12,15 @@
   V2 — + подтверждение индикатором: за последние 3 часа (включая сигнальный) Trand-Test-2 на 1h
        дал сигнал в ту же сторону.
   V3 — + монета связана с BTC: корреляция часовых доходностей за прошлые 30 дней >= 0.6.
+  V4 — БОТ НА 4Ч: вход при развороте 4Ч (1Д в ту же сторону, ADX 4Ч >= 25, MRC 4Ч не на краю,
+       цена по ту же сторону 200Д, BTC 1Д за), шаг сетки = ATR 4ч (не меньше 1%), та же формула
+       тейка/стопа, ордера 300 $. Сделки крупнее и реже — «запустил и забыл», как у разработчика.
 
 КАК ТОРГУЕТ ЧЕЛОВЕК: до 3 позиций одновременно (не больше одной на монету), 30% сигналов
 пропущено, 500 сценариев на каждый год отдельно.
 
 КРИТЕРИИ (объявлены ДО прогона):
-  A) V2 или V3 лучше V1, если медиана итога года лучше в 3 из 4 проверочных лет
+  A) V2, V3 или V4 лучше V1, если медиана итога года лучше в 3 из 4 проверочных лет
      (2023, 2024, 2025, 2026 — последний неполный) и сумма медиан по этим годам больше.
   B) Отбор монет работает для варианта, если топ-7 монет по году N в году N+1 лучше всех монет
      (и по средней сделке, и по медиане итога) в 3 из 4 переходов 2022→23, 23→24, 24→25, 25→26.
@@ -143,6 +146,33 @@ def scen(trades):
             "dd": dds[SCEN // 2], "n": ns[SCEN // 2]}
 
 
+def bot_entries_4h(h4, d1):
+    """Вход при развороте 4Ч по тренду 1Д: (время закрытия 4ч, сторона, индекс 4ч)."""
+    tr4, trd, adx4 = c.trend_arr(h4), c.trend_arr(d1), c.adx_arr(h4)
+    dcl = [x[4] for x in d1]
+    pre = [0.0]
+    for v in dcl:
+        pre.append(pre[-1] + v)
+    out, jd = [], -1
+    for i in range(300, len(h4)):
+        T = h4[i][0] + c.H4
+        while jd + 1 < len(d1) and d1[jd + 1][0] + c.D1 <= T:
+            jd += 1
+        if jd < 199:
+            continue
+        d = tr4[i]
+        if d == 0 or d == tr4[i - 1] or trd[jd] != d or adx4[i] < c.ADX_BOT:
+            continue
+        s200 = (pre[jd + 1] - pre[jd - 199]) / 200
+        if (d == 1 and not dcl[jd] > s200) or (d == -1 and dcl[jd] > s200):
+            continue
+        z = c.mrc_zone(h4[i - 298:i + 1])
+        if (d == 1 and z == "перекуп") or (d == -1 and z == "перепрод"):
+            continue
+        out.append((T, d, i))
+    return out
+
+
 def main():
     t0 = time.time()
     say("МНОГОЛЕТНЯЯ ПРОВЕРКА · %s · монет %d · с 2022 года · исполнение 15m · до %d позиций"
@@ -158,7 +188,8 @@ def main():
         i = bisect.bisect_right(btc_t, T - c.D1) - 1
         return btc_tr[i] if i >= 0 else 0
 
-    V = {"V1": "бот + BTC 1Д (база)", "V2": "+ подтверждение индикатором (3 ч)", "V3": "+ корреляция с BTC >= 0.6"}
+    V = {"V1": "бот + BTC 1Д (база)", "V2": "+ подтверждение индикатором (3 ч)", "V3": "+ корреляция с BTC >= 0.6",
+         "V4": "бот на 4ч (шаг ATR 4ч)"}
     tr = {v: [] for v in V}              # (T, pnl, t_exit, монета)
     for sym in MONEY:
         b15, h4, d1 = data.get(sym) or ([], [], [])
@@ -191,6 +222,18 @@ def main():
                 tr["V2"].append(rec)
             if corr[i] is not None and corr[i] >= 0.6:
                 tr["V3"].append(rec)
+        atr4 = c.atr_pct(h4)
+        n4 = 0
+        for T, d, i in bot_entries_4h(h4, d1):
+            if T < START or btc_at_close(T) != d:
+                continue
+            k0 = bisect.bisect_left(t15, T)
+            if k0 >= len(b15) - 1:
+                continue
+            pnl, te = sim_grid(b15, k0, d, max(atr4[i], c.MIN_STEP))
+            tr["V4"].append((T, pnl, te, sym))
+            n4 += 1
+        say("  %s: бот на 4ч — входов %d" % (sym, n4))
         say("  %s: с %s, входов бота (BTC 1Д за) %d" % (sym, datetime.fromtimestamp(b15[0][0] / 1000, tz=timezone.utc)
                                                          .strftime("%Y-%m-%d"), n_b))
 
@@ -217,7 +260,7 @@ def main():
     say("")
     say("КРИТЕРИЙ A (объявлен до прогона): лучше V1 в 3 из 4 лет 2023–2026 и сумма больше")
     test_years = [2023, 2024, 2025, 2026]
-    for v in ("V2", "V3"):
+    for v in ("V2", "V3", "V4"):
         wins = sum(1 for y in test_years if y in yr[v] and y in yr["V1"] and yr[v][y]["med"] > yr["V1"][y]["med"])
         s_v = sum(yr[v][y]["med"] for y in test_years if y in yr[v])
         s_b = sum(yr["V1"][y]["med"] for y in test_years if y in yr["V1"])
