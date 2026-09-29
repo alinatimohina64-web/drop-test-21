@@ -1,0 +1,43 @@
+name: coin-wf-test
+
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Сколько дней 5-минуток"
+        required: false
+        default: "730"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Restore data cache
+        uses: actions/cache@v4
+        with:
+          path: data_ind
+          key: cwf-data-${{ github.run_id }}
+          restore-keys: |
+            cwf-data-
+            multi-data-
+            oos-data-
+            cmp-data-
+            ind-data-
+      - name: Run
+        env:
+          DAYS: ${{ github.event.inputs.days }}
+        run: |
+          pip install --quiet numpy
+          python coin_wf_test.py
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coin-wf-report
+          path: coin_wf_report.txt
+          if-no-files-found: warn
