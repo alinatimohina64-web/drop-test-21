@@ -1,0 +1,45 @@
+name: mrc-chart-new
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: pip install --quiet numpy
+
+      - name: Restore data cache
+        uses: actions/cache@v4
+        with:
+          path: data_ind
+          key: data-ind-confirm-${{ github.run_id }}
+          restore-keys: |
+            data-ind-confirm-
+            data-ind-
+            data_ind-
+            data_ind
+            data-
+
+      - name: Run
+        env:
+          MRC_COINS: "SUI,APT,ARB,OP,INJ,TIA,SEI,WLD,TRX,HBAR,ICP,FET,STX,IMX,GALA,SAND,MANA,AXS,SHIB,TON"
+          MRC_SRC: "chart"
+          MRC_STRICT: "1"
+          MRC_TFS: "30m"
+        run: python mrc_filter_test.py
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mrc-chart-new-report
+          path: mrc_filter_report.txt
