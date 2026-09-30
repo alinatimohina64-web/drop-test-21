@@ -1,48 +1,44 @@
-name: mrc-filter-test
+name: mrc-confirm-test
 
 on:
   workflow_dispatch:
-    inputs:
-      days:
-        description: "Сколько дней 5-минуток"
-        required: false
-        default: "730"
 
 jobs:
-        env:
-          MRC_COINS: "SUI,APT,ARB,OP,INJ,TIA,SEI,WLD,TRX,HBAR,ICP,FET,STX,IMX,GALA,SAND,MANA,AXS,SHIB,TON"
-          MRC_TFS: "30m"
-          MRC_SCHEMES: "simple"
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 340
+    timeout-minutes: 330
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Install
+        run: pip install --quiet numpy
+
       - name: Restore data cache
         uses: actions/cache@v4
         with:
           path: data_ind
-          key: adapt-data-${{ github.run_id }}
+          key: data-ind-confirm-${{ github.run_id }}
           restore-keys: |
-            adapt-data-
-            cwf-data-
-            multi-data-
-            oos-data-
-            cmp-data-
-            ind-data-
+            data-ind-confirm-
+            data-ind-
+            data_ind-
+            data_ind
+            data-
+
       - name: Run
         env:
-          DAYS: ${{ github.event.inputs.days }}
-        run: |
-          pip install --quiet numpy
-          python mrc_filter_test.py
+          MRC_COINS: "SUI,APT,ARB,OP,INJ,TIA,SEI,WLD,TRX,HBAR,ICP,FET,STX,IMX,GALA,SAND,MANA,AXS,SHIB,TON"
+          MRC_TFS: "30m"
+          MRC_SCHEMES: "simple"
+        run: python mrc_filter_test.py
+
       - name: Upload report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: adapt-report
+          name: mrc-confirm-report
           path: mrc_filter_report.txt
-          if-no-files-found: warn
