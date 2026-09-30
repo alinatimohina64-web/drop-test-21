@@ -33,6 +33,18 @@ VIX, индекс доллара (FRED) и золота (Stooq). Разрабо�
   знак эффекта на разработке. B3 — разница средних недельных ходов между режимами одного знака на
   разработке и проверке и t >= 2 на проверке.
 
+ЧАСТЬ D — ОБЪЁМ: «цена растёт, а объём падает — скоро вниз» (и зеркально для падения).
+  Сигнал: закрытие на максимуме 20 свечей, а средний объём последних 10 свечей меньше 0.8 от
+  предыдущих 10. Сравнение — с такими же максимумами, но без падения объёма (иначе проверяем не
+  объём, а сам факт максимума). Горизонт: 4Ч-свечи → следующие 24 ч, дневки → следующие 7 дней.
+  КРИТЕРИЙ (до прогона): после «максимума на падающем объёме» BTC выше реже, чем после обычного
+  максимума, на >= 3 п.п., z >= 2 на проверке и тот же знак на разработке (зеркально для минимумов).
+
+ЧАСТЬ E — МОЖНО ЛИ НА ЭТОМ ЗАРАБОТАТЬ: прогноз атласа на 4 ч как сделка (вход сейчас, выход через
+  4 ч по рынку), комиссия 0.11% за круг (тейкер) и 0.04% (лимитки с обеих сторон, для справки).
+  КРИТЕРИЙ: средняя сделка на проверке после комиссии тейкера > 0 и t >= 2, и прогноз даёт больше, чем
+  простой рост/падение рынка за то же время (сверх дрейфа > 0, t >= 2).
+
 КОНТРОЛЬ: всё то же на случайных ценах BTC (мартингал). Там закономерностей быть не должно —
   если «находятся», тест дефектен.
 
@@ -75,13 +87,22 @@ def to_ms(dstr):
 
 def _fetch_text(url):
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=60) as r:
+    with urllib.request.urlopen(req, timeout=180) as r:
         return r.read().decode("utf-8", "replace")
 
 
 def load_fred(sid):
+    txt = None
+    for a in range(3):
+        try:
+            txt = _fetch_text("https://fred.stlouisfed.org/graph/fredgraph.csv?id=%s&cosd=2016-01-01" % sid)
+            break
+        except Exception as e:                                      # noqa: BLE001
+            say("  ! FRED %s попытка %d: %s" % (sid, a + 1, e))
+            time.sleep(5)
+    if txt is None:
+        return {}
     try:
-        txt = _fetch_text("https://fred.stlouisfed.org/graph/fredgraph.csv?id=%s&cosd=2016-01-01" % sid)
         rows = list(csv.reader(io.StringIO(txt)))
         out = {}
         for r in rows[1:]:
@@ -208,7 +229,9 @@ def atlas(pts_all, label):
     say("  --- %s" % label)
     passed_any = False
     lines = []
+    preds = {}
     for hz, pts in pts_all.items():
+        preds[hz] = []
         dev = [p for p in pts if p[0] < TEST_FROM]
         tst = [p for p in pts if p[0] >= TEST_FROM]
         lo, hi = terciles([p[1]["MOMraw"] for p in dev])
@@ -235,6 +258,7 @@ def atlas(pts_all, label):
                 if n >= MIN_N[hz] and abs(up / n - base_dev) >= MIN_DIFF:
                     chosen.append((fs, key, 1 if up / n > base_dev else -1, up / n, n))
         base_t = sum(1 for p in tst if p[2] > 0) / max(1, len(tst))
+        preds["_drift_" + hz] = sum(p[2] for p in tst) / max(1, len(tst))
         hits = exp = var = 0.0
         n_pred = 0
         cell_hold = 0
@@ -256,6 +280,7 @@ def atlas(pts_all, label):
                 continue
             d = 1 if vote > 0 else -1
             q = base_t if d == 1 else 1 - base_t
+            preds[hz].append((d, p[2]))
             n_pred += 1
             hits += 1 if (p[2] > 0) == (d == 1) else 0
             exp += q
@@ -278,7 +303,76 @@ def atlas(pts_all, label):
             if hold and nt >= 30:
                 lines.append("%s: %s — выше в %.0f%% (проверка, %d случаев; обычно %.0f%%)"
                              % (hz, nm, 100 * upt, nt, 100 * base_t))
-    return passed_any, lines
+    return passed_any, lines, preds
+
+
+def trade_part(preds, label):
+    """Часть E: прогноз 4 ч как сделка через 4 ч, с комиссией. Сравнение и с «просто дрейфом рынка»."""
+    v = preds.get("4ч") or []
+    drift = preds.get("_drift_4ч", 0.0)
+    ok = False
+    for nm, fee in (("тейкер 0.11%", 0.11), ("лимитки 0.04%", 0.04)):
+        r = [d * x - fee for d, x in v]
+        mu, t = mean_t(r)
+        if nm.startswith("тейкер"):
+            ok_fee = len(r) >= 100 and mu > 0 and t >= 2
+        say("  %-28s %-14s сделок %5d · средняя %+.3f%% · t = %+.1f" % (label, nm, len(r), mu, t))
+    gross, _ = mean_t([d * x for d, x in v])
+    share_long = sum(1 for d, x in v if d == 1) / max(1, len(v))
+    by_drift = (2 * share_long - 1) * drift              # сколько дал бы сам рост/падение рынка при той же доле лонгов
+    ex, t_ex = mean_t([d * x - (2 * share_long - 1) * drift for d, x in v])
+    ok = ok_fee and ex > 0 and t_ex >= 2 if v else False
+    say("  %-28s без комиссии: ход в сторону прогноза %+.3f%% за 4 ч, из них дрейф рынка %+.3f%% · сверх дрейфа %+.3f%% (t = %+.1f)"
+        % (label, gross, by_drift, ex, t_ex))
+    return ok
+
+
+def volume_part(b5, label):
+    """Часть D: максимум/минимум 20 свечей на падающем объёме против такого же без падения объёма."""
+    say("")
+    say("  --- %s" % label)
+    ok_any = False
+    for tfn, ms, hor in (("4Ч", H4, 6), ("1Д", D1, 7)):
+        bars = c.agg(b5, ms)
+        cl = [x[4] for x in bars]
+        vo = [x[5] for x in bars]
+        for side, nm in ((1, "максимум"), (-1, "минимум")):
+            grp = {("dev", True): [], ("dev", False): [], ("tst", True): [], ("tst", False): []}
+            skip = -1
+            for i in range(40, len(bars) - hor):
+                if i <= skip:
+                    continue
+                w = cl[i - 19:i + 1]
+                if (side == 1 and cl[i] < max(w)) or (side == -1 and cl[i] > min(w)):
+                    continue
+                v_new = sum(vo[i - 9:i + 1]) / 10
+                v_old = sum(vo[i - 19:i - 9]) / 10
+                if v_old <= 0:
+                    continue
+                falling = v_new < 0.8 * v_old
+                per = "tst" if bars[i][0] + ms >= TEST_FROM else "dev"
+                grp[(per, falling)].append(1 if cl[i + hor] > cl[i] else 0)
+                skip = i + hor - 1                                   # точки не перекрываются
+            row = []
+            eff = {}
+            for per in ("dev", "tst"):
+                a, b = grp[(per, True)], grp[(per, False)]
+                pa = sum(a) / len(a) if a else 0.0
+                pb = sum(b) / len(b) if b else 0.0
+                eff[per] = (pa, pb, len(a), len(b))
+                row.append("%s: на падающем объёме выше в %.1f%% (%d) / без падения %.1f%% (%d)"
+                           % ("разработка" if per == "dev" else "проверка", 100 * pa, len(a), 100 * pb, len(b)))
+            pa, pb, na, nb = eff["tst"]
+            pp = (pa * na + pb * nb) / max(1, na + nb)
+            z = (pb - pa) / math.sqrt(max(1e-9, pp * (1 - pp) * (1 / max(1, na) + 1 / max(1, nb))))
+            z *= side                                     # для максимума ждём «реже выше», для минимума — «чаще выше»
+            d_dev = (eff["dev"][1] - eff["dev"][0]) * side
+            ok = na >= 30 and nb >= 30 and (pb - pa) * side >= 0.03 and z >= 2 and d_dev > 0
+            ok_any |= ok
+            say("  %s, %s 20 свечей → через %s: %s · z = %+.1f → %s"
+                % (tfn, nm, "24 ч" if tfn == "4Ч" else "7 дней", " · ".join(row), z,
+                   "ОБЪЁМ ПОДСКАЗЫВАЕТ" if ok else "нет"))
+    return ok_any
 
 
 def vol_part(b5):
@@ -493,16 +587,36 @@ def main():
         macro = {}
     else:
         b5 = L.load_btc_5m()
-        macro = {"spx": load_fred("SP500"), "ndx": load_fred("NASDAQCOM"), "vix": load_fred("VIXCLS"),
-                 "usd": load_fred("DTWEXBGS"), "gold": load_stooq("xauusd")}
+        macro = {}
+        for key, fred_id, stooq_ids in (("spx", "SP500", ["^spx"]), ("ndx", "NASDAQCOM", ["^ndx", "^ndq"]),
+                                        ("vix", "VIXCLS", ["^vix"]), ("usd", "DTWEXBGS", ["dx.f", "usdidx"]),
+                                        ("gold", None, ["xauusd"])):
+            ser = load_fred(fred_id) if fred_id else {}
+            for sid in stooq_ids:
+                if len(ser) >= 300:
+                    break
+                ser = load_stooq(sid)
+            macro[key] = ser
         say("  макро: " + ", ".join("%s %d дн." % (k, len(v)) for k, v in macro.items()))
     sb, _ = L.synth(b5[0][0], b5[-1][0] + L.M5, 777)
 
     say("")
     say("=" * 118)
     say("ЧАСТЬ A — АТЛАС СИТУАЦИЙ: угадывается ли направление BTC (4 ч / 24 ч / 7 дней)")
-    okA, lines = atlas(build_points(b5), "РЕАЛЬНЫЙ BTC")
-    okA_c, _ = atlas(build_points(sb), "КОНТРОЛЬ — СЛУЧАЙНЫЕ ЦЕНЫ (должно быть «нет»)")
+    okA, lines, preds = atlas(build_points(b5), "РЕАЛЬНЫЙ BTC")
+    okA_c, _, preds_c = atlas(build_points(sb), "КОНТРОЛЬ — СЛУЧАЙНЫЕ ЦЕНЫ (должно быть «нет»)")
+
+    say("")
+    say("=" * 118)
+    say("ЧАСТЬ E — ПРОГНОЗ АТЛАСА НА 4 Ч КАК СДЕЛКА (вход сейчас, выход через 4 ч), проверка 2022–2026:")
+    okE = trade_part(preds, "реальный BTC")
+    okE_c = trade_part(preds_c, "контроль (случайные цены)")
+
+    say("")
+    say("=" * 118)
+    say("ЧАСТЬ D — ОБЪЁМ: «цена растёт, объём падает — скоро вниз»")
+    okD = volume_part(b5, "РЕАЛЬНЫЙ BTC")
+    okD_c = volume_part(sb, "КОНТРОЛЬ — СЛУЧАЙНЫЕ ЦЕНЫ (должно быть «нет»)")
 
     say("")
     say("=" * 118)
@@ -513,8 +627,9 @@ def main():
     say("")
     say("=" * 118)
     say("ЧАСТЬ B — МЕЖРЫНОК")
-    okB = macro_part(b5, macro, "РЕАЛЬНЫЙ BTC") if macro else False
-    okB_c = macro_part(sb, macro, "КОНТРОЛЬ — СЛУЧАЙНЫЕ ЦЕНЫ BTC (должно быть «нет»)") if macro else False
+    has_macro = macro and any(len(v) > 300 for v in macro.values())
+    okB = macro_part(b5, macro, "РЕАЛЬНЫЙ BTC") if has_macro else False
+    okB_c = macro_part(sb, macro, "КОНТРОЛЬ — СЛУЧАЙНЫЕ ЦЕНЫ BTC (должно быть «нет»)") if has_macro else False
     if macro:
         corr_part(b5, macro)
 
@@ -523,8 +638,12 @@ def main():
     say("ВЕРДИКТ (объявлен до прогона):")
     say("  А. Направление BTC по ситуации угадывается: %s%s" % ("ДА" if okA else "нет",
         " — НО контроль тоже «нашёл», тест под подозрением" if okA_c else ""))
-    say("  B. Межрыночные закономерности есть: %s%s" % ("ДА" if okB else "нет",
+    say("  B. Межрыночные закономерности есть: %s%s" % ("ДА" if okB else "нет" if macro and any(len(v) > 300 for v in macro.values()) else "не проверено — данные не скачались",
         " — НО контроль тоже «нашёл», тест под подозрением" if okB_c else ""))
+    say("  D. Падающий объём на максимуме/минимуме подсказывает разворот: %s%s" % ("ДА" if okD else "нет",
+        " — НО контроль тоже «нашёл», тест под подозрением" if okD_c else ""))
+    say("  E. На прогнозе атласа 4 ч можно заработать после комиссий: %s%s" % ("ДА" if okE else "нет",
+        " — НО контроль тоже «нашёл», тест под подозрением" if okE_c else ""))
     if lines:
         say("")
         say("Ячейки, удержавшие направление на проверке (кандидаты в индикатор; проверять дальше вживую):")
