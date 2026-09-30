@@ -23,6 +23,11 @@
   2) разница «оставшиеся» − «горячие» статистически заметна: t >= 2.
 Схема РАБОТАЕТ, если критерий выполнен не меньше чем в 3 ячейках из 4.
 Результат в R и в $ при позиции 3 000 $ (маржа 300 × 10). Отчёт: mrc_filter_report.txt
+СРАВНЕНИЕ СТАРШЕГО ТФ 4ч ПРОТИВ 1Д (переменная MRC_HTF_COMPARE=1, объявлено до прогона): график 30m,
+  схема А (уровень 2), обе пары; сравниваются сделки ПОСЛЕ фильтра. «1Д лучше 4ч», если в обеих парах
+  средняя сделка 1Д выше в обеих половинах 2022–2026 и в 3 из 4 лет 2023–2026 (для молодых монет —
+  в большинстве лет со сделками). Запускать на обоих наборах монет (основном и MRC_COINS) — вывод
+  принимается, только если оба прогона согласны.
 ПОВТОРНАЯ ПРОВЕРКА на других монетах (режим подтверждения, задаётся переменными окружения):
   MRC_COINS=SUI,APT,...  MRC_TFS=30m  MRC_SCHEMES=simple  — тогда схема подтверждена, если критерий выполнен
   во ВСЕХ ячейках, а условие по годам — «лучше в большинстве лет, где есть сделки» (у молодых монет меньше лет).
@@ -115,6 +120,102 @@ def hot_flag(scheme, d, px, mean, rng):
     else:
         thr = outer - 2.0 * rng                          # вход в светлую зону у внешней границы
     return px >= mean + thr if d == 1 else px <= mean - thr
+
+
+def compare_htf():
+    """Сравнение старшего ТФ индикатора 4ч и 1Д на отфильтрованных сделках (схема А, 30m)."""
+    t0 = time.time()
+    coins = [x.strip().upper() for x in os.environ["MRC_COINS"].split(",")] if CONFIRM else list(mt.MONEY)
+    say("СТАРШИЙ ТФ 4ч ПРОТИВ 1Д · %s · монет %d · 30m · MRC схема А (ур. 2) · BTC 1Д · позиция %.0f $"
+        % (datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"), len(coins), NOTIONAL))
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        data = dict(ex.map(mt.load_coin, ["BTC"] + coins))
+    bd1 = data["BTC"][2]
+    btc_t, btc_tr = [x[0] for x in bd1], c.trend_arr(bd1)
+
+    def btc_at(T):
+        i = bisect.bisect_right(btc_t, T - c.D1) - 1
+        return btc_tr[i] if i >= 0 else 0
+
+    res = {(hk, p): [] for hk in ("4ч", "1Д") for p in PAIRS}
+    for sym in coins:
+        b15, h4, d1 = data.get(sym) or ([], [], [])
+        if len(b15) < (20000 if CONFIRM else 50000) or len(d1) < 400:
+            say("  %s: мало данных — пропуск" % sym)
+            continue
+        t15 = np.array([x[0] for x in b15], dtype=np.int64)
+        o = np.array([x[1] for x in b15])
+        h = np.array([x[2] for x in b15])
+        l = np.array([x[3] for x in b15])
+        cl = np.array([x[4] for x in b15])
+        h4a = c.agg(b15, c.H4)
+        c4 = [x[4] for x in h4a]
+        cd = [x[4] for x in d1]
+        dt = [x[0] for x in d1]
+        htfs = {"4ч": ([x[0] for x in h4a], [a > b_ for a, b_ in zip(c.ema(c4, 9), c.ema(c4, 21))], c.H4),
+                "1Д": (dt, [a > b_ for a, b_ in zip(c.ema(cd, 9), c.ema(cd, 21))], c.D1)}
+        mean = supersmoother([(x[2] + x[3] + x[4]) / 3 for x in d1], 200)
+        rng = supersmoother(c.trs(d1), 200)
+        b = c.agg(b15, M30)
+        atrp = c.atr_pct(b)
+        for hk, (ht, hu, hms) in htfs.items():
+            for T, d, i in cw.ind_entries_tf(b, M30, ht, hu, hms):
+                if T < mt.START or atrp[i] <= 0 or btc_at(T) != d:
+                    continue
+                k0 = int(np.searchsorted(t15, T, side="left"))
+                if k0 >= len(t15) - 1:
+                    continue
+                jd = bisect.bisect_right(dt, T - c.D1) - 1
+                if jd < 250 or hot_flag("simple", d, b[i][4], mean[jd], rng[jd]):
+                    continue
+                a = atrp[i] / 100
+                rs = cw.exits_R(o, h, l, cl, k0, d, atrp[i])
+                for (tp, sl), r in zip(PAIRS, rs):
+                    res[(hk, (tp, sl))].append((T, r, r * sl * a * NOTIONAL))
+        say("  %s: готово · %.0f с" % (sym, time.time() - t0))
+    now = int(time.time() * 1000)
+    mid = TEST_FROM + (now - TEST_FROM) // 2
+    ok_all = True
+    for tp, sl in PAIRS:
+        say("")
+        say("  цель %g / стоп %g × ATR (сделки после фильтра MRC, проверка 2022–2026)" % (tp, sl))
+        for hk in ("4ч", "1Д"):
+            v = [x for x in res[(hk, (tp, sl))] if x[0] >= TEST_FROM]
+            mu, t, n = mean_t([x[1] for x in v])
+            wr = 100 * sum(1 for x in v if x[1] > 0) / max(1, n)
+            say("    старший %s: сделок %5d · WR %4.1f%% · %+.3f R/сд · %+.2f $/сд · итог %+8.0f $"
+                % (hk, n, wr, mu, sum(x[2] for x in v) / max(1, n), sum(x[2] for x in v)))
+        a4 = [x for x in res[("4ч", (tp, sl))] if x[0] >= TEST_FROM]
+        a1 = [x for x in res[("1Д", (tp, sl))] if x[0] >= TEST_FROM]
+        yl, better, n_y = [], 0, 0
+        for y in TEST_YEARS:
+            v4 = [x[1] for x in a4 if year_of(x[0]) == y]
+            v1 = [x[1] for x in a1 if year_of(x[0]) == y]
+            if len(v4) >= 50 and len(v1) >= 50:
+                n_y += 1
+            m4, _, _ = mean_t(v4)
+            m1, _, _ = mean_t(v1)
+            better += m1 > m4
+            yl.append("%d: 4ч %+.3f / 1Д %+.3f" % (y, m4, m1))
+        halves = []
+        for cond in (lambda T: T < mid, lambda T: T >= mid):
+            m4, _, _ = mean_t([x[1] for x in a4 if cond(x[0])])
+            m1, _, _ = mean_t([x[1] for x in a1 if cond(x[0])])
+            halves.append(m1 > m4)
+        need = (n_y // 2 + 1) if CONFIRM else 3
+        ok = all(halves) and better >= need
+        ok_all &= ok
+        say("    по годам (R/сд): " + " · ".join(yl))
+        say("    1Д лучше: обе половины [%s] · лет %d (нужно %d) → %s" % ("да" if all(halves) else "нет", better, need,
+                                                                         "да" if ok else "нет"))
+    say("")
+    say("ВЕРДИКТ (объявлен до прогона): %s" % ("старший 1Д ЛУЧШЕ 4ч на этом наборе монет" if ok_all
+                                             else "старший 1Д не лучше 4ч на этом наборе монет"))
+    say("  (вывод принимается, только если прогоны на обоих наборах монет согласны)")
+    say("")
+    say("Время %.0f мин" % ((time.time() - t0) / 60))
+    with open(REPORT, "w", encoding="utf-8") as f:
+        f.write("\n".join(_out) + "\n")
 
 
 def main():
@@ -246,4 +347,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if os.environ.get("MRC_HTF_COMPARE") == "1":
+        compare_htf()
+    else:
+        main()
