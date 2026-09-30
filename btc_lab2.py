@@ -85,22 +85,17 @@ def to_ms(dstr):
 
 # ============================================================ макро-данные
 
-def _fetch_text(url):
+def _fetch_text(url, timeout=25):
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=180) as r:
+    with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read().decode("utf-8", "replace")
 
 
 def load_fred(sid):
-    txt = None
-    for a in range(3):
-        try:
-            txt = _fetch_text("https://fred.stlouisfed.org/graph/fredgraph.csv?id=%s&cosd=2016-01-01" % sid)
-            break
-        except Exception as e:                                      # noqa: BLE001
-            say("  ! FRED %s попытка %d: %s" % (sid, a + 1, e))
-            time.sleep(5)
-    if txt is None:
+    try:
+        txt = _fetch_text("https://fred.stlouisfed.org/graph/fredgraph.csv?id=%s&cosd=2016-01-01" % sid)
+    except Exception as e:                                          # noqa: BLE001
+        say("  ! FRED %s: %s" % (sid, e))
         return {}
     try:
         rows = list(csv.reader(io.StringIO(txt)))
@@ -111,6 +106,24 @@ def load_fred(sid):
         return out
     except Exception as e:                                          # noqa: BLE001
         say("  ! FRED %s не загружен (%s)" % (sid, e))
+        return {}
+
+
+def load_yahoo(sym):
+    """Дневные закрытия с Yahoo Finance (chart API, без ключа)."""
+    import json
+    try:
+        url = ("https://query1.finance.yahoo.com/v8/finance/chart/%s?period1=1451606400&period2=%d&interval=1d"
+               % (urllib.request.quote(sym), int(time.time())))
+        js = json.loads(_fetch_text(url))
+        r = js["chart"]["result"][0]
+        out = {}
+        for t, cl in zip(r["timestamp"], r["indicators"]["quote"][0]["close"]):
+            if cl:
+                out[datetime.fromtimestamp(t, tz=timezone.utc).strftime("%Y-%m-%d")] = float(cl)
+        return out
+    except Exception as e:                                          # noqa: BLE001
+        say("  ! Yahoo %s: %s" % (sym, e))
         return {}
 
 
@@ -588,14 +601,16 @@ def main():
     else:
         b5 = L.load_btc_5m()
         macro = {}
-        for key, fred_id, stooq_ids in (("spx", "SP500", ["^spx"]), ("ndx", "NASDAQCOM", ["^ndx", "^ndq"]),
-                                        ("vix", "VIXCLS", ["^vix"]), ("usd", "DTWEXBGS", ["dx.f", "usdidx"]),
-                                        ("gold", None, ["xauusd"])):
-            ser = load_fred(fred_id) if fred_id else {}
-            for sid in stooq_ids:
-                if len(ser) >= 300:
-                    break
-                ser = load_stooq(sid)
+        fred_dead = False
+        for key, yahoo_id, stooq_id, fred_id in (("spx", "^GSPC", "^spx", "SP500"), ("ndx", "^IXIC", "^ndq", "NASDAQCOM"),
+                                                 ("vix", "^VIX", "^vix", "VIXCLS"), ("usd", "DX-Y.NYB", "dx.f", "DTWEXBGS"),
+                                                 ("gold", "GC=F", "xauusd", None)):
+            ser = load_yahoo(yahoo_id)
+            if len(ser) < 300:
+                ser = load_stooq(stooq_id)
+            if len(ser) < 300 and fred_id and not fred_dead:
+                ser = load_fred(fred_id)
+                fred_dead = len(ser) < 300              # FRED не отвечает — больше не ждём его
             macro[key] = ser
         say("  макро: " + ", ".join("%s %d дн." % (k, len(v)) for k, v in macro.items()))
     sb, _ = L.synth(b5[0][0], b5[-1][0] + L.M5, 777)
