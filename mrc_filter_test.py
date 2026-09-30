@@ -28,6 +28,10 @@
   средняя сделка 1Д выше в обеих половинах 2022–2026 и в 3 из 4 лет 2023–2026 (для молодых монет —
   в большинстве лет со сделками). Запускать на обоих наборах монет (основном и MRC_COINS) — вывод
   принимается, только если оба прогона согласны.
+КАНАЛ НА ТФ ГРАФИКА, КАК У РАЗРАБОТЧИКА (MRC_SRC=chart, объявлено до прогона): SuperSmoother 200 по свечам
+  самого графика (30m), а не по дневкам — канал идёт за ценой. Схемы: А упрощённая ур. ≥ 2, Б разработчика
+  ур. ≥ 1, В разработчика ур. ≥ 2 (цена у самой внешней границы). Строгий режим (MRC_STRICT=1): схема работает,
+  если критерий выполнен во ВСЕХ ячейках; запускать на обоих наборах монет.
 ПОВТОРНАЯ ПРОВЕРКА на других монетах (режим подтверждения, задаётся переменными окружения):
   MRC_COINS=SUI,APT,...  MRC_TFS=30m  MRC_SCHEMES=simple  — тогда схема подтверждена, если критерий выполнен
   во ВСЕХ ячейках, а условие по годам — «лучше в большинстве лет, где есть сделки» (у молодых монет меньше лет).
@@ -104,9 +108,14 @@ def supersmoother(src, n):
     return out
 
 
-SCHEMES = [("А упрощённая, ур. ≥ 2", "simple"), ("Б как у разработчика, ур. ≥ 1", "dev")]
+SCHEMES = [("А упрощённая, ур. ≥ 2", "simple"), ("Б как у разработчика, ур. ≥ 1", "dev"),
+           ("В как у разработчика, ур. ≥ 2", "dev2")]
+MRC_SRC = os.environ.get("MRC_SRC") or "daily"
 TFS = [("15m", M15), ("30m", M30)]
 CONFIRM = bool(os.environ.get("MRC_COINS"))
+STRICT = CONFIRM or os.environ.get("MRC_STRICT") == "1"
+if not os.environ.get("MRC_SCHEMES") and MRC_SRC == "daily":
+    SCHEMES = [x for x in SCHEMES if x[1] != "dev2"]
 if os.environ.get("MRC_TFS"):
     TFS = [x for x in TFS if x[0] in os.environ["MRC_TFS"].split(",")]
 if os.environ.get("MRC_SCHEMES"):
@@ -117,6 +126,8 @@ def hot_flag(scheme, d, px, mean, rng):
     outer = math.pi * 2.415 * rng
     if scheme == "simple":
         thr = (math.pi * 1.0 * rng + outer) / 2          # середина между внутренней и внешней границей
+    elif scheme == "dev2":
+        thr = outer - 0.5 * rng                          # средняя зона — у самой внешней границы
     else:
         thr = outer - 2.0 * rng                          # вход в светлую зону у внешней границы
     return px >= mean + thr if d == 1 else px <= mean - thr
@@ -223,7 +234,7 @@ def main():
     coins = [x.strip().upper() for x in os.environ["MRC_COINS"].split(",")] if CONFIRM else list(mt.MONEY)
     if CONFIRM:
         say("РЕЖИМ ПОДТВЕРЖДЕНИЯ на других монетах: все ячейки должны пройти, годы — большинство лет со сделками")
-    say("ФИЛЬТР MRC (дневной канал) · %s · монет %d · 15m и 30m / старший 4ч / BTC 1Д · позиция %.0f $ (300 × 10)"
+    say(("ФИЛЬТР MRC (канал по свечам графика, как у разработчика)" if MRC_SRC == "chart" else "ФИЛЬТР MRC (дневной канал)") + " · %s · монет %d · 15m и 30m / старший 4ч / BTC 1Д · позиция %.0f $ (300 × 10)"
         % (datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"), len(coins), NOTIONAL))
     with ThreadPoolExecutor(max_workers=3) as ex:
         data = dict(ex.map(mt.load_coin, ["BTC"] + coins))
@@ -255,6 +266,9 @@ def main():
         for tfn, tfms in TFS:
             b = b15 if tfms == M15 else c.agg(b15, tfms)
             atrp = c.atr_pct(b)
+            if MRC_SRC == "chart":
+                cmean = supersmoother([(x[2] + x[3] + x[4]) / 3 for x in b], 200)
+                crng = supersmoother(c.trs(b), 200)
             for T, d, i in cw.ind_entries_tf(b, tfms, [x[0] for x in h4a], hu, c.H4):
                 if T < mt.START or atrp[i] <= 0 or btc_at(T) != d:
                     continue
@@ -267,8 +281,11 @@ def main():
                 px = b[i][4]
                 a = atrp[i] / 100
                 rs = cw.exits_R(o, h, l, cl, k0, d, atrp[i])
+                if MRC_SRC == "chart" and i < 400:
+                    continue
+                mv, rv = (cmean[i], crng[i]) if MRC_SRC == "chart" else (mean[jd], rng[jd])
                 for _, sc in SCHEMES:
-                    hot = hot_flag(sc, d, px, mean[jd], rng[jd])
+                    hot = hot_flag(sc, d, px, mv, rv)
                     if tfn == TFS[-1][0]:
                         cnt[sc][0] += 1
                         cnt[sc][1] += hot
@@ -324,7 +341,7 @@ def main():
                 v1 = sum((x - m1) ** 2 for x in a_k) / max(1, n1 - 1)
                 v2 = sum((x - m2) ** 2 for x in a_h) / max(1, n2 - 1)
                 t_diff = (m1 - m2) / math.sqrt(v1 / max(1, n1) + v2 / max(1, n2)) if n1 > 2 and n2 > 2 else 0.0
-                need_y = (n_y // 2 + 1) if CONFIRM else 3
+                need_y = (n_y // 2 + 1) if STRICT else 3
                 ok = all(halves) and better_y >= need_y and t_diff >= 2
                 passed += ok
                 say("    по годам (все / после фильтра, R): " + " · ".join(yl))
@@ -332,7 +349,7 @@ def main():
                     % ("да" if all(halves) else "нет", better_y, need_y, "да" if better_y >= need_y else "нет",
                        "да" if t_diff >= 2 else "нет", t_diff, "да" if ok else "нет"))
         n_cells = len(TFS) * len(PAIRS)
-        need = n_cells if CONFIRM else 3
+        need = n_cells if STRICT else 3
         verdict[scn] = passed >= need
         say("")
         say("  СХЕМА %s: критерий выполнен в %d из %d ячеек (нужно %d) → %s"
