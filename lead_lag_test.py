@@ -15,6 +15,9 @@
 Сравнение (контроль): те же моменты, но альт НЕ отстал (уже прошёл >= хода BTC). Если догоняние реально,
 у отставших ход дальше в сторону BTC должен быть больше, чем у не отставших.
 
+ВАРИАНТ 2 «часовой импульс» (объявлен до прогона, переменные окружения): LL_LOOK=12 LL_MOVE=1.0
+LL_HOLDS=12,24,48 — BTC за 1 час прошёл >= 1%, альт отстал, выход через 1, 2 или 4 часа. Критерий тот же.
+
 КРИТЕРИЙ (объявлен ДО прогона). Идея работает, если хотя бы для одного из трёх сроков выхода:
   1) на проверке 2024–2026 средняя сделка после комиссии 0.11% > 0 и t >= 2;
   2) на разработке 2021–2023 средняя сделка после комиссии тоже > 0;
@@ -37,10 +40,10 @@ REPORT = "lead_lag_report.txt"
 DATA_DIR = "data_btc"
 ALTS = ["ETH", "SOL", "XRP", "DOGE", "ADA", "LINK", "AVAX", "LTC"]
 M5 = 300000
-LOOK = 3                      # 15 минут
-MOVE = 0.006                  # 0.6%
-LAG = 0.5                     # альт прошёл меньше половины хода BTC
-HOLDS = [(3, "15 мин"), (6, "30 мин"), (12, "60 мин")]
+LOOK = int(os.environ.get("LL_LOOK") or 3)             # свечей 5m назад: 3 = 15 минут, 12 = 1 час
+MOVE = float(os.environ.get("LL_MOVE") or 0.6) / 100    # ход BTC, %
+LAG = 0.5                                               # альт прошёл меньше половины хода BTC
+HOLDS = [(int(h), "%d мин" % (int(h) * 5)) for h in (os.environ.get("LL_HOLDS") or "3,6,12").split(",")]
 FEE_T, FEE_M = 0.11, 0.04
 NOTIONAL = 3000.0
 START = datetime(2021, 1, 1, tzinfo=timezone.utc)
@@ -143,8 +146,8 @@ def year_of(t):
 
 def main():
     t0 = time.time()
-    say("«BTC ПОШЁЛ — АЛЬТ ЕЩЁ НЕТ» · %s · BTC за 15 мин >= %.1f%%, альт прошёл < %.0f%% хода BTC · 5m Binance с 2021"
-        % (datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"), MOVE * 100, LAG * 100))
+    say("«BTC ПОШЁЛ — АЛЬТ ЕЩЁ НЕТ» · %s · BTC за %d мин >= %.1f%%, альт прошёл < %.0f%% хода BTC · 5m Binance с 2021"
+        % (datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"), LOOK * 5, MOVE * 100, LAG * 100))
     bt, bo, bc = load_5m("BTC")
     bidx = {int(t): i for i, t in enumerate(bt)}
     res = {h: {"lag": [], "nolag": []} for h, _ in HOLDS}     # (T, ход в сторону BTC, %)
@@ -152,7 +155,7 @@ def main():
         at, ao, ac = load_5m(sym)
         n_sig = 0
         busy = {h: 0 for h, _ in HOLDS}
-        for i in range(LOOK, len(at) - 13):
+        for i in range(LOOK, len(at) - max(h for h, _ in HOLDS) - 2):
             T = int(at[i])
             j = bidx.get(T)
             if j is None or j < LOOK or int(bt[j - LOOK]) != T - LOOK * M5 or int(at[i - LOOK]) != T - LOOK * M5:

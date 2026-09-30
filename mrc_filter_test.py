@@ -23,6 +23,9 @@
   2) разница «оставшиеся» − «горячие» статистически заметна: t >= 2.
 Схема РАБОТАЕТ, если критерий выполнен не меньше чем в 3 ячейках из 4.
 Результат в R и в $ при позиции 3 000 $ (маржа 300 × 10). Отчёт: mrc_filter_report.txt
+ПОВТОРНАЯ ПРОВЕРКА на других монетах (режим подтверждения, задаётся переменными окружения):
+  MRC_COINS=SUI,APT,...  MRC_TFS=30m  MRC_SCHEMES=simple  — тогда схема подтверждена, если критерий выполнен
+  во ВСЕХ ячейках, а условие по годам — «лучше в большинстве лет, где есть сделки» (у молодых монет меньше лет).
 Лежит рядом с compare_test.py, multi_test.py, coin_wf_test.py (данные — из их кэша).
 """
 import bisect
@@ -30,6 +33,8 @@ import math
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+
+import os
 
 import numpy as np
 
@@ -96,6 +101,11 @@ def supersmoother(src, n):
 
 SCHEMES = [("А упрощённая, ур. ≥ 2", "simple"), ("Б как у разработчика, ур. ≥ 1", "dev")]
 TFS = [("15m", M15), ("30m", M30)]
+CONFIRM = bool(os.environ.get("MRC_COINS"))
+if os.environ.get("MRC_TFS"):
+    TFS = [x for x in TFS if x[0] in os.environ["MRC_TFS"].split(",")]
+if os.environ.get("MRC_SCHEMES"):
+    SCHEMES = [x for x in SCHEMES if x[1] in os.environ["MRC_SCHEMES"].split(",")]
 
 
 def hot_flag(scheme, d, px, mean, rng):
@@ -109,7 +119,9 @@ def hot_flag(scheme, d, px, mean, rng):
 
 def main():
     t0 = time.time()
-    coins = list(mt.MONEY)
+    coins = [x.strip().upper() for x in os.environ["MRC_COINS"].split(",")] if CONFIRM else list(mt.MONEY)
+    if CONFIRM:
+        say("РЕЖИМ ПОДТВЕРЖДЕНИЯ на других монетах: все ячейки должны пройти, годы — большинство лет со сделками")
     say("ФИЛЬТР MRC (дневной канал) · %s · монет %d · 15m и 30m / старший 4ч / BTC 1Д · позиция %.0f $ (300 × 10)"
         % (datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"), len(coins), NOTIONAL))
     with ThreadPoolExecutor(max_workers=3) as ex:
@@ -124,7 +136,7 @@ def main():
     res = {(tf, p, sc): [] for tf, _ in TFS for p in PAIRS for _, sc in SCHEMES}   # (T, горячий?, R, $)
     for sym in coins:
         b15, h4, d1 = data.get(sym) or ([], [], [])
-        if len(b15) < 50000 or len(d1) < 400:
+        if len(b15) < (20000 if CONFIRM else 50000) or len(d1) < 400:
             say("  %s: мало данных — пропуск" % sym)
             continue
         t15 = np.array([x[0] for x in b15], dtype=np.int64)
@@ -156,13 +168,13 @@ def main():
                 rs = cw.exits_R(o, h, l, cl, k0, d, atrp[i])
                 for _, sc in SCHEMES:
                     hot = hot_flag(sc, d, px, mean[jd], rng[jd])
-                    if tfn == "30m":
+                    if tfn == TFS[-1][0]:
                         cnt[sc][0] += 1
                         cnt[sc][1] += hot
                     for (tp, sl), r in zip(PAIRS, rs):
                         res[(tfn, (tp, sl), sc)].append((T, hot, r, r * sl * a * NOTIONAL))
-        say("  %s: доля «горячих» сигналов (30m): А %.0f%% · Б %.0f%% · %.0f с"
-            % (sym, 100 * cnt["simple"][1] / max(1, cnt["simple"][0]), 100 * cnt["dev"][1] / max(1, cnt["dev"][0]),
+        say("  %s: доля «горячих» сигналов (%s): %s · %.0f с"
+            % (sym, TFS[-1][0], " · ".join("%s %.0f%%" % (scn[0], 100 * cnt[sc][1] / max(1, cnt[sc][0])) for scn, sc in SCHEMES),
                time.time() - t0))
 
     now = int(time.time() * 1000)
@@ -190,8 +202,11 @@ def main():
                                 ("убранные («горячие»)", [x for x in v if x[1]])):
                     say(line(nm, sub))
                 better_y = 0
+                n_y = 0
                 yl = []
                 for y in TEST_YEARS:
+                    if sum(1 for x in v if year_of(x[0]) == y) >= 50:
+                        n_y += 1
                     m_all, _, _ = mean_t([x[2] for x in v if year_of(x[0]) == y])
                     m_k, _, _ = mean_t([x[2] for x in v if year_of(x[0]) == y and not x[1]])
                     better_y += m_k > m_all
@@ -208,17 +223,21 @@ def main():
                 v1 = sum((x - m1) ** 2 for x in a_k) / max(1, n1 - 1)
                 v2 = sum((x - m2) ** 2 for x in a_h) / max(1, n2 - 1)
                 t_diff = (m1 - m2) / math.sqrt(v1 / max(1, n1) + v2 / max(1, n2)) if n1 > 2 and n2 > 2 else 0.0
-                ok = all(halves) and better_y >= 3 and t_diff >= 2
+                need_y = (n_y // 2 + 1) if CONFIRM else 3
+                ok = all(halves) and better_y >= need_y and t_diff >= 2
                 passed += ok
                 say("    по годам (все / после фильтра, R): " + " · ".join(yl))
-                say("    критерий: обе половины [%s] · 3 из 4 лет [%s, %d] · t >= 2 [%s, %+.1f] → %s"
-                    % ("да" if all(halves) else "нет", "да" if better_y >= 3 else "нет", better_y,
+                say("    критерий: обе половины [%s] · лет лучше: %d (нужно %d) [%s] · t >= 2 [%s, %+.1f] → %s"
+                    % ("да" if all(halves) else "нет", better_y, need_y, "да" if better_y >= need_y else "нет",
                        "да" if t_diff >= 2 else "нет", t_diff, "да" if ok else "нет"))
-        verdict[scn] = passed
+        n_cells = len(TFS) * len(PAIRS)
+        need = n_cells if CONFIRM else 3
+        verdict[scn] = passed >= need
         say("")
-        say("  СХЕМА %s: критерий выполнен в %d из 4 ячеек → %s" % (scn, passed, "РАБОТАЕТ" if passed >= 3 else "не работает"))
+        say("  СХЕМА %s: критерий выполнен в %d из %d ячеек (нужно %d) → %s"
+            % (scn, passed, n_cells, need, "РАБОТАЕТ" if passed >= need else "не работает"))
     say("")
-    say("ВЕРДИКТ (объявлен до прогона): " + " · ".join("%s — %s" % (k, "РАБОТАЕТ" if v >= 3 else "не работает")
+    say("ВЕРДИКТ (объявлен до прогона): " + " · ".join("%s — %s" % (k, "РАБОТАЕТ" if v else "не работает")
                                                      for k, v in verdict.items()))
     say("")
     say("Время %.0f мин" % ((time.time() - t0) / 60))
