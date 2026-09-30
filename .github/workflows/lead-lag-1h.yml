@@ -1,0 +1,40 @@
+name: lead-lag-1h
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: pip install numpy
+
+      - name: Cache BTC data
+        uses: actions/cache@v4
+        with:
+          path: data_btc
+          key: btc-5m-${{ github.run_id }}
+          restore-keys: |
+            btc-5m-
+
+      - name: Run
+        env:
+          LL_LOOK: "12"
+          LL_MOVE: "1.0"
+          LL_HOLDS: "12,24,48"
+        run: python lead_lag_test.py
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lead-lag-1h-report
+          path: lead_lag_report.txt
