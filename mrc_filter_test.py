@@ -32,6 +32,10 @@
   самого графика (30m), а не по дневкам — канал идёт за ценой. Схемы: А упрощённая ур. ≥ 2, Б разработчика
   ур. ≥ 1, В разработчика ур. ≥ 2 (цена у самой внешней границы). Строгий режим (MRC_STRICT=1): схема работает,
   если критерий выполнен во ВСЕХ ячейках; запускать на обоих наборах монет.
+УРОВЕНЬ 3 ПРОТИВ УРОВНЯ 2 (объявлено до прогона): MRC_SCHEMES=simple,simple3,dev3 MRC_TFS=30m MRC_STRICT=1,
+  на обоих наборах монет. Вариант (Г — упрощённая ур. 3, Д — разработчика ур. 3) лучше уровня 2, если
+  (1) сам проходит критерий фильтра и (2) итог в $ сделок после фильтра у него больше, чем у уровня 2,
+  в обеих парах и на обоих наборах монет.
 ПОВТОРНАЯ ПРОВЕРКА на других монетах (режим подтверждения, задаётся переменными окружения):
   MRC_COINS=SUI,APT,...  MRC_TFS=30m  MRC_SCHEMES=simple  — тогда схема подтверждена, если критерий выполнен
   во ВСЕХ ячейках, а условие по годам — «лучше в большинстве лет, где есть сделки» (у молодых монет меньше лет).
@@ -109,13 +113,14 @@ def supersmoother(src, n):
 
 
 SCHEMES = [("А упрощённая, ур. ≥ 2", "simple"), ("Б как у разработчика, ур. ≥ 1", "dev"),
-           ("В как у разработчика, ур. ≥ 2", "dev2")]
+           ("В как у разработчика, ур. ≥ 2", "dev2"), ("Г упрощённая, ур. ≥ 3", "simple3"),
+           ("Д как у разработчика, ур. ≥ 3", "dev3")]
 MRC_SRC = os.environ.get("MRC_SRC") or "daily"
 TFS = [("15m", M15), ("30m", M30)]
 CONFIRM = bool(os.environ.get("MRC_COINS"))
 STRICT = CONFIRM or os.environ.get("MRC_STRICT") == "1"
 if not os.environ.get("MRC_SCHEMES") and MRC_SRC == "daily":
-    SCHEMES = [x for x in SCHEMES if x[1] != "dev2"]
+    SCHEMES = [x for x in SCHEMES if x[1] not in ("dev2", "simple3", "dev3")]
 if os.environ.get("MRC_TFS"):
     TFS = [x for x in TFS if x[0] in os.environ["MRC_TFS"].split(",")]
 if os.environ.get("MRC_SCHEMES"):
@@ -126,6 +131,10 @@ def hot_flag(scheme, d, px, mean, rng):
     outer = math.pi * 2.415 * rng
     if scheme == "simple":
         thr = (math.pi * 1.0 * rng + outer) / 2          # середина между внутренней и внешней границей
+    elif scheme == "dev3":
+        thr = outer + 1.5 * rng                          # экстремальная зона разработчика
+    elif scheme == "simple3":
+        thr = outer                                      # за внешней границей
     elif scheme == "dev2":
         thr = outer - 0.5 * rng                          # средняя зона — у самой внешней границы
     else:
@@ -354,6 +363,25 @@ def main():
         say("")
         say("  СХЕМА %s: критерий выполнен в %d из %d ячеек (нужно %d) → %s"
             % (scn, passed, n_cells, need, "РАБОТАЕТ" if passed >= need else "не работает"))
+    keys = [sc for _, sc in SCHEMES]
+    for alt, alt_nm in (("simple3", "упрощённая ур. 3"), ("dev3", "разработчика ур. 3")):
+        if "simple" not in keys or alt not in keys:
+            continue
+        say("")
+        say("%s ПРОТИВ упрощённой ур. 2 — итог в $ сделок после фильтра (проверка 2022–2026):" % alt_nm.upper())
+        better = True
+        for tfn, _ in TFS:
+            for tp, sl in PAIRS:
+                tot = {}
+                for sc in ("simple", alt):
+                    v = [x for x in res[(tfn, (tp, sl), sc)] if x[0] >= TEST_FROM and not x[1]]
+                    tot[sc] = (sum(x[3] for x in v), len(v), sum(x[2] for x in v) / max(1, len(v)))
+                ok3 = tot[alt][0] > tot["simple"][0]
+                better &= ok3
+                say("  %s · %g/%g: ур.2 %+.0f $ (%d сд, %+.3f R/сд) · %s %+.0f $ (%d сд, %+.3f R/сд) → %s"
+                    % (tfn, tp, sl, tot["simple"][0], tot["simple"][1], tot["simple"][2], alt_nm,
+                       tot[alt][0], tot[alt][1], tot[alt][2], "больше у " + alt_nm if ok3 else "больше у ур.2"))
+        say("  → %s %s по итогу в $ на этом наборе монет" % (alt_nm, "ЛУЧШЕ ур.2" if better else "не лучше ур.2"))
     say("")
     say("ВЕРДИКТ (объявлен до прогона): " + " · ".join("%s — %s" % (k, "РАБОТАЕТ" if v else "не работает")
                                                      for k, v in verdict.items()))
