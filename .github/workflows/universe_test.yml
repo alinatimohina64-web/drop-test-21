@@ -1,0 +1,53 @@
+name: universe-test
+
+on:
+  workflow_dispatch:
+    inputs:
+      coins_limit:
+        description: "Сколько монет (0 - все; для пробы 40)"
+        default: "40"
+      start_year:
+        description: "С какого года"
+        default: "2019"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: pip install numpy
+
+      - name: Restore BTC data cache
+        uses: actions/cache/restore@v4
+        with:
+          path: data_btc
+          key: btc-5m-${{ github.run_id }}
+          restore-keys: |
+            btc-5m-
+
+      - name: Run
+        env:
+          COINS_LIMIT: ${{ inputs.coins_limit }}
+          START_YEAR: ${{ inputs.start_year }}
+        run: python universe_test.py
+
+      - name: Save BTC data cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: data_btc
+          key: btc-5m-${{ github.run_id }}
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: universe-report
+          path: universe_report.txt
