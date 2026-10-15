@@ -23,14 +23,18 @@ BTC не торгуем. Вход по открытию 15m после сигн�
   3) средний R > 0 в обеих половинах периода (в каждой не меньше 15 сделок) и в обеих непересекающихся
      группах монет (чётные/нечётные по алфавиту, не меньше 15 сделок в каждой);
   4) портфель (5 слотов, медиана по 100 случайным порядкам равных сигналов, с издержками) на топ-N даёт больше
-     суммарного R, чем на топ-50, а максимальная просадка в R не больше чем в 1.2 раза выше.
+     суммарного R, чем на топ-50, а максимальная просадка в R не больше чем в 1.2 раза выше;
+  5) (добавлен 15.10 до полного прогона) R за слот-день у новых монет (с издержками: сумма R / сумма дней
+     удержания) не меньше, чем у топ-50 — слоты узкое место, быстрое освобождение слота важно.
+ИНФОРМАЦИОННО (не в критерии): медиана удержания, доля сделок дольше 7 дней, среднее число занятых слотов.
 ОГРАНИЧЕНИЯ (честно): набор — монеты, которые есть на Binance спот; ранг считается внутри набора, а не по всему
 рынку; монеты, которых давно нет, в набор попали только если у них есть исторические файлы; новые монеты без
 250 дневок (как VAL) правилом не торгуются вовсе. Контрольный прогон на синтетических случайных ценах не
 добавлен: движок не менялся, базой служит случайный вход на реальных свечах.
 
 Запуск: python universe_test.py. Первый прогон долгий (скачивание истории ~100 монет), дальше — из кэша data_btc/.
-Переменные: START_YEAR (2019), RND_N (300), COINS_LIMIT (для быстрой пробы). Отчёт: universe_report.txt
+Переменные: START_YEAR (2019), RND_N (300), EXTRA_LIMIT (сколько НОВЫХ монет взять, 0 — все; старые 41 берутся
+всегда). Отчёт: universe_report.txt
 """
 import bisect
 import os
@@ -49,6 +53,7 @@ M30, D1, H4 = cs.M30, cs.D1, cs.H4
 TP_X, SL_X, SL_CAP, STAR = 5.0, 20.0, 0.80, 0.30
 SLOTS, RISK = 5, 50.0
 EXTRA_RT = 0.002
+DAY_MS = 86400000.0
 RND_N = int(os.environ.get("RND_N") or 300)
 START = int(datetime(int(os.environ.get("START_YEAR") or 2019), 1, 1, tzinfo=timezone.utc).timestamp() * 1000)
 BANDS = [(1, 50), (51, 100), (101, 150), (151, 10 ** 6)]
@@ -61,7 +66,7 @@ EXTRA = ["MATIC", "FTM", "EOS", "XTZ", "VET", "THETA", "EGLD", "FLOW", "KAVA", "
          "BONK", "WIF", "JUP", "PYTH", "DYDX", "SSV", "BLUR", "JTO", "STRK", "ORDI", "ETHFI", "W", "ENA", "AR",
          "ROSE", "CFX", "PENDLE", "RPL", "WOO", "CKB", "IOTX", "GMT", "MASK", "API3", "CVX", "BAL", "ZRX", "STORJ",
          "SKL", "COTI", "JASMY", "AUDIO", "BAND", "CTSI", "DENT", "FXS", "GLM", "ID", "LQTY", "MAGIC", "OCEAN",
-         "AGIX", "ACH", "AMP", "ARPA", "CELR", "CHR", "DGB", "DUSK", "FET", "FUN", "HIVE", "KNC", "LINA", "LSK",
+         "AGIX", "ACH", "AMP", "ARPA", "CELR", "CHR", "DGB", "DUSK", "FUN", "HIVE", "KNC", "LINA", "LSK",
          "NKN", "OGN", "PERP", "REEF", "RSR", "SXP", "TLM", "TRB", "UMA", "WAVES", "XEM", "YGG"]
 _out = []
 
@@ -161,6 +166,11 @@ def avg(v, extra=False):
     return sum(adj(s, extra) for s in v) / len(v) if v else float("nan")
 
 
+def slotday(v, extra=True):
+    days = sum(s["days"] for s in v)
+    return sum(adj(s, extra) for s in v) / days if days > 0 else float("nan")
+
+
 def fmt(x):
     return "—" if x != x else "%+.3f" % x
 
@@ -204,7 +214,7 @@ def equity(taken, end_t, extra):
     return cum, dd
 
 
-def band_halves(v, mid, extra=False):
+def band_halves(v, mid):
     a = [s for s in v if s["T"] < mid]
     b = [s for s in v if s["T"] >= mid]
     return a, b
@@ -221,10 +231,13 @@ def main():
     say("РАСШИРЕНИЕ СПИСКА МОНЕТ ДЛЯ ⭐-СИГНАЛОВ · %s · Binance 15m · риск %.0f $, слотов %d"
         % (datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"), RISK, SLOTS))
     btc = st.Btc()
-    coins = [s for s in dict.fromkeys(list(st.MAIN_COINS) + list(st.NEW_COINS) + EXTRA) if s != "BTC"]
-    lim = int(os.environ.get("COINS_LIMIT") or 0)
+    old = [s for s in dict.fromkeys(list(st.MAIN_COINS) + list(st.NEW_COINS)) if s != "BTC"]
+    new = [s for s in dict.fromkeys(EXTRA) if s not in old and s != "BTC"]
+    lim = int(os.environ.get("EXTRA_LIMIT") or 0)
     if lim:
-        coins = coins[:lim]
+        new = new[:lim]
+    say("Старых монет (всегда): %d · новых в этом прогоне: %d" % (len(old), len(new)))
+    coins = old + new
     P = {}
     for sym in ["BTC"] + coins:
         if sym != "BTC" and not has_data(sym):
@@ -252,11 +265,14 @@ def main():
             for T, d, r, te, slf, dk in p[kind]:
                 rk = rank.get((sym, dk))
                 if rk is not None:
-                    dst.append({"sym": sym, "T": T, "d": d, "r": r, "te": te, "slf": slf, "rank": rk})
+                    dst.append({"sym": sym, "T": T, "d": d, "r": r, "te": te, "slf": slf, "rank": rk,
+                                "days": ((te if te is not None else end_t) - T) / DAY_MS})
     if not sig:
         say("Нет сигналов.")
         return
-    mid = (min(s["T"] for s in sig) + end_t) // 2
+    first_t = min(s["T"] for s in sig)
+    mid = (first_t + end_t) // 2
+    span_days = (end_t - first_t) / DAY_MS
     sig1 = one_per_coin(sig)
     say("")
     say("Монет в наборе на начало года (с данными, считая BTC): " + " · ".join(
@@ -283,6 +299,8 @@ def main():
         say("  %-14s сделок %4d · WR %3.0f%% · средний R %s (с издержками %s) · итог %+.1f R ≈ %+.0f $ · случайный вход %s (%d)"
             % (name, len(v), 100 * sum(1 for s in v if s["r"] > 0) / len(v), fmt(avg(v)), fmt(avg(v, True)),
                sum(adj(s, True) for s in v), sum(adj(s, True) for s in v) * RISK, fmt(avg(rv)), len(rv)))
+        say("      удержание: медиана %.1f дн · дольше 7 дн %.0f%% · R за слот-день %s"
+            % (med([s["days"] for s in v]), 100 * sum(1 for s in v if s["days"] > 7) / len(v), fmt(slotday(v))))
         say("      половины: %s (%d) / %s (%d) · группы монет: %s (%d) / %s (%d) · по годам: %s" % (
             fmt(avg(a, True)), len(a), fmt(avg(b, True)), len(b), fmt(avg(ga, True)), len(ga), fmt(avg(gb, True)), len(gb),
             " · ".join("%d: %s (%d)" % (y, fmt(avg(s_, True)), len(s_)) for y, s_ in sorted(yrs.items()))))
@@ -301,13 +319,14 @@ def main():
                   "tot": med([r[1][0] for r in runs]), "dd": med([r[1][1] for r in runs]),
                   "n": med([r[2] for r in runs]), "elig": runs[0][3]}
         tk0, _ = portfolio(sig, N, 0)
+        busy = sum(s["days"] for s in tk0) / span_days if span_days > 0 else float("nan")
         yrs = {}
         for s in tk0:
             yrs.setdefault(datetime.fromtimestamp(s["T"] / 1000, tz=timezone.utc).year, []).append(s)
         label = "топ-%d" % N if N < 10 ** 6 else "весь набор"
-        say("  %-11s сигналов %4d → взято %4d · итог с издержками %+7.1f R ≈ %+6.0f $ (без них %+.1f R) · "
-            "просадка %+.1f R ≈ %+.0f $ · по годам: %s" % (
-                label, res[N]["elig"], res[N]["n"], res[N]["tot_x"], res[N]["tot_x"] * RISK, res[N]["tot"],
+        say("  %-11s сигналов %4d → взято %4d · занято слотов в среднем %.1f из %d · итог с издержками %+7.1f R ≈ %+6.0f $ "
+            "(без них %+.1f R) · просадка %+.1f R ≈ %+.0f $ · по годам: %s" % (
+                label, res[N]["elig"], res[N]["n"], busy, SLOTS, res[N]["tot_x"], res[N]["tot_x"] * RISK, res[N]["tot"],
                 res[N]["dd_x"], res[N]["dd_x"] * RISK,
                 " · ".join("%d: %+.1f R (%d)" % (y, sum(adj(s, True) for s in v), len(v)) for y, v in sorted(yrs.items()))))
 
@@ -320,22 +339,23 @@ def main():
     say("  0) контроль, группа 1–50: средний R %s, случайный %s → %s" % (
         fmt(avg(base)), fmt(avg(base_r)), "ОК" if k0 else "не выполнен — сравнение ненадёжно"))
     for N in CANDS:
-        new = [s for s in sig1 if 50 < s["rank"] <= N]
-        newr = [s for s in rnd if 50 < s["rank"] <= N]
-        a, b = band_halves(new, mid)
-        ga, gb = groups(new)
-        k1 = len(new) >= 50 and avg(new, True) > 0
-        k2 = avg(new) > avg(newr)
+        nw = [s for s in sig1 if 50 < s["rank"] <= N]
+        nwr = [s for s in rnd if 50 < s["rank"] <= N]
+        a, b = band_halves(nw, mid)
+        ga, gb = groups(nw)
+        k1 = len(nw) >= 50 and avg(nw, True) > 0
+        k2 = avg(nw) > avg(nwr)
         k3 = (len(a) >= 15 and len(b) >= 15 and avg(a, True) > 0 and avg(b, True) > 0 and
               len(ga) >= 15 and len(gb) >= 15 and avg(ga, True) > 0 and avg(gb, True) > 0)
         k4 = res[N]["tot_x"] > res[50]["tot_x"] and -res[N]["dd_x"] <= 1.2 * -res[50]["dd_x"]
-        ok = k1 and k2 and k3 and k4
+        k5 = len(nw) > 0 and slotday(nw) >= slotday(base)
+        ok = k1 and k2 and k3 and k4 and k5
         label = "топ-%d" % N if N < 10 ** 6 else "весь набор"
         say("  %-11s 1) сделок %d, R с издержками %s [%s] · 2) против случайного %s / %s [%s] · 3) половины/группы [%s] · "
-            "4) портфель %+.1f R против %+.1f R, просадка %+.1f против %+.1f [%s] → %s" % (
-                label, len(new), fmt(avg(new, True)), "да" if k1 else "нет", fmt(avg(new)), fmt(avg(newr)),
+            "4) портфель %+.1f R против %+.1f R, просадка %+.1f против %+.1f [%s] · 5) R за слот-день %s против %s [%s] → %s" % (
+                label, len(nw), fmt(avg(nw, True)), "да" if k1 else "нет", fmt(avg(nw)), fmt(avg(nwr)),
                 "да" if k2 else "нет", "да" if k3 else "нет", res[N]["tot_x"], res[50]["tot_x"], res[N]["dd_x"],
-                res[50]["dd_x"], "да" if k4 else "нет",
+                res[50]["dd_x"], "да" if k4 else "нет", fmt(slotday(nw)), fmt(slotday(base)), "да" if k5 else "нет",
                 "РАСШИРЯТЬ" if (ok and k0) else "не расширять"))
     say("")
     say("Время %.0f мин" % ((time.time() - t0) / 60))
