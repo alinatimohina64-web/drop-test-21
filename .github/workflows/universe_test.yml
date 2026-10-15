@@ -3,9 +3,9 @@ name: universe-test
 on:
   workflow_dispatch:
     inputs:
-      coins_limit:
-        description: "Сколько монет (0 - все; для пробы 40)"
-        default: "40"
+      extra_limit:
+        description: "Сколько НОВЫХ монет (0 - все; для пробы 30). Старые 41 берутся всегда"
+        default: "30"
       start_year:
         description: "С какого года"
         default: "2019"
@@ -34,7 +34,7 @@ jobs:
 
       - name: Run
         env:
-          COINS_LIMIT: ${{ inputs.coins_limit }}
+          EXTRA_LIMIT: ${{ inputs.extra_limit }}
           START_YEAR: ${{ inputs.start_year }}
         run: python universe_test.py
 
