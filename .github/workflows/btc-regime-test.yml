@@ -6,7 +6,7 @@ on:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
 
@@ -26,6 +26,10 @@ jobs:
             tt-15m-
 
       - name: Run
+        env:
+          # третий набор: 38 крупных монет с историей на Binance с 2021 года или раньше,
+          # ни одна не участвовала в прошлых тестах
+          NEW: "SHIB,HBAR,ICP,FET,INJ,GRT,STX,RUNE,EGLD,AXS,THETA,SAND,MANA,CHZ,KAVA,NEO,DASH,ZIL,QTUM,BAT,ICX,ENJ,CRV,COMP,SNX,1INCH,SUSHI,YFI,CAKE,ONE,IOTA,IOTX,ROSE,KSM,FLOW,GALA,LRC,ANKR"
         run: python btc_regime_test.py
 
       - name: Upload report
