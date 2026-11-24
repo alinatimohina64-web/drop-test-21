@@ -1,0 +1,43 @@
+name: combo-2h-test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: pip install numpy
+
+      - name: Restore BTC data cache
+        uses: actions/cache/restore@v4
+        with:
+          path: data_btc
+          key: btc-5m-${{ github.run_id }}
+          restore-keys: |
+            btc-5m-
+
+      - name: Run
+        run: python combo_2h_test.py
+
+      - name: Save BTC data cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: data_btc
+          key: btc-5m-${{ github.run_id }}
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: combo-2h-report
+          path: combo_2h_report.txt
